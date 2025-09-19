@@ -1,0 +1,89 @@
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+
+
+const app = express();
+app.use(cors());
+
+
+const server = http.createServer(app);
+const io = new Server(server, {
+cors: {
+origin: '*',
+methods: ['GET', 'POST']
+}
+});
+
+
+// ---- In-memory room store (프로덕션에선 Redis 같은 외부 스토리지 권장)
+const rooms = new Map();
+
+
+function makeEmptyState() {
+const ROWS = 6, COLS = 7;
+return {
+board: Array.from({ length: ROWS }, () => Array(COLS).fill(0)),
+current: 1, // 1 또는 2 (턴)
+winner: 0,
+history: [],
+scores: { 1: 0, 2: 0 },
+players: {}, // socket.id -> { side: 1|2|null, name?: string }
+lastUpdated: Date.now(),
+chat: []
+};
+}
+
+
+function getRoom(roomId) {
+if (!rooms.has(roomId)) rooms.set(roomId, makeEmptyState());
+return rooms.get(roomId);
+}
+
+
+io.on('connection', (socket) => {
+socket.on('room:join', ({ roomId, name }) => {
+socket.join(roomId);
+const state = getRoom(roomId);
+state.players[socket.id] = state.players[socket.id] || { side: null, name: name || '' };
+
+
+// 방 인원에게 현재 상태 브로드캐스트
+io.to(roomId).emit('room:state', sanitize(state));
+});
+
+
+socket.on('room:leave', ({ roomId }) => {
+socket.leave(roomId);
+});
+
+
+socket.on('room:chooseSide', ({ roomId, side }) => {
+const state = getRoom(roomId);
+// 같은 side 중복 방지
+const taken = Object.values(state.players).some(p => p.side === side);
+if (!taken && state.players[socket.id]) {
+state.players[socket.id].side = side; // 1 또는 2
+io.to(roomId).emit('room:state', sanitize(state));
+}
+});
+
+
+socket.on('game:reset', ({ roomId }) => {
+const ns = makeEmptyState();
+rooms.set(roomId, ns);
+io.to(roomId).emit('room:state', sanitize(ns));
+});
+
+
+socket.on('chat:msg', ({ roomId, text, name }) => {
+const state = getRoom(roomId);
+const msg = { id: Date.now()+Math.random(), text: String(text||'').slice(0,300), name: (name||'') , ts: Date.now() };
+state.chat.push(msg);
+if (state.chat.length > 100) state.chat.shift();
+io.to(roomId).emit('chat:list', state.chat);
+});
+
+
+});
